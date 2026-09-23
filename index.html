@@ -31,9 +31,9 @@ pre { background: #f3f3f3; padding: .5em; white-space: pre-wrap; overflow-wrap: 
 <p><button id="download" hidden></button></p>
 <pre id="log">Loading Ruby…</pre>
 
-<script type="module">
-import { zipSync } from './fflate/index.js';
-
+<script src="fflate/index.js"></script>
+<script>
+'use strict';
 const $ = (id) => document.getElementById(id);
 const log = $('log');
 const print = (t) => { log.textContent += t + '\n'; log.scrollTop = log.scrollHeight; };
@@ -121,7 +121,7 @@ function zip(entries) {
     const attrs = e.dir ? 0o40755 * 0x10000 + 0x10 : 0o100644 * 0x10000;
     files[e.path] = [e.dir ? new Uint8Array(0) : e.data, { mtime: new Date(e.mtime), os: 3, attrs }];
   }
-  return new Blob([zipSync(files)], { type: 'application/zip' });
+  return new Blob([fflate.zipSync(files)], { type: 'application/zip' });
 }
 </script>
 </body>
