@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cooker</title>
+<style>
+body { font-family: sans-serif; max-width: 46em; margin: 1em auto; padding: 0 1em; line-height: 1.4; }
+fieldset { margin: .5em 0; }
+label { display: block; margin: .25em 0; }
+code { font-size: .95em; }
+pre { background: #f3f3f3; padding: .5em; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24em; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>cooker</h1>
+<p>TiddlyWiki <a href="https://github.com/TiddlyWiki/cooker">cooker</a>, on Ruby 1.8.7 compiled to WebAssembly. Files are processed in browser.</p>
+
+<h2>ginsu.rb</h2>
+<label>TiddlyWiki file: <input type="file" id="ginsu-file" accept=".html,.htm"></label>
+<fieldset>
+<legend>Options</legend>
+<label><input type="checkbox" id="ginsu-s"> <code>-s, --subdirectories</code> Split tiddlers into subdirectories by type</label>
+<label><code>-t, --tag TAGDIRECTORY</code> With <code>-s</code>, put tiddlers with this tag in their own subdirectory: <input type="text" id="ginsu-t"></label>
+<label><code>-c, --charset CHARSET</code> Character set of file names: <input type="text" id="ginsu-c"></label>
+<label><input type="checkbox" id="ginsu-q"> <code>-q, --quiet</code> Quiet mode, do not output file names</label>
+</fieldset>
+<button id="run-ginsu" disabled>Run ginsu.rb</button>
+
+<h2>Output</h2>
+<p><button id="download" hidden></button></p>
+<pre id="log">Loading Ruby…</pre>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const log = $('log');
+const print = (t) => { log.textContent += t + '\n'; log.scrollTop = log.scrollHeight; };
+
+// ---- Ruby worker ----
+const worker = new Worker('cooker-worker.js');
+let ready = false, busy = false, pending = null;
+worker.onmessage = ({ data: m }) => {
+  if (m.type === 'ready') { ready = true; log.textContent = ''; print('Ruby 1.8.7 ready.'); refresh(); }
+  else if (m.type === 'out') print(m.text);
+  else if (m.type === 'done') pending.resolve(m);
+  else if (m.type === 'fail') {
+    if (pending) pending.reject(new Error(m.error));
+    else print('Could not start Ruby: ' + m.error + (location.protocol === 'file:' ? ' (serve this page over http)' : ''));
+  }
+};
+function ruby(argv, cwd, files) {
+  return new Promise((resolve, reject) => {
+    pending = { resolve, reject };
+    worker.postMessage({ type: 'run', argv, cwd, files });
+  }).finally(() => { pending = null; });
+}
+function refresh() {
+  $('run-ginsu').disabled = !ready || busy || !$('ginsu-file').files.length;
+}
+
+// ---- ginsu.rb ----
+$('ginsu-file').onchange = refresh;
+$('run-ginsu').onclick = () => go(async () => {
+  const file = $('ginsu-file').files[0];
+  const argv = ['-I/cooker', '/cooker/ginsu.rb', file.name];
+  if ($('ginsu-s').checked) argv.push('-s');
+  for (const o of ['t', 'c']) if ($('ginsu-' + o).value.trim()) argv.push('-' + o, $('ginsu-' + o).value.trim());
+  if ($('ginsu-q').checked) argv.push('-q');
+  // Run next to a writable copy of the wiki, as `ginsu.rb wiki.html` would in a shell:
+  // ginsu creates wiki.html.0/ beside it, and that directory is the tarball.
+  const res = await start(argv, '/out', [{ path: file.name, file }]);
+  const top = res.files.find((f) => f.dir);
+  const split = top ? res.files.filter((f) => f.path.startsWith(top.path)) : [];
+  if (split.some((f) => !f.dir)) await saveArchive(top.path.replace(/\/$/, ''), split);
+});
+
+async function start(argv, cwd, files) {
+  log.textContent = '';
+  offered = null; $('download').hidden = true;
+  print('$ ruby ' + argv.slice(1).map((a) => /^[\w@%+=:,./-]+$/.test(a) ? a : "'" + a.replace(/'/g, "'\\''") + "'").join(' '));
+  const t0 = performance.now();
+  const res = await ruby(argv, cwd, files);
+  print(`[exit ${res.status}, ${Math.round(performance.now() - t0)} ms]`);
+  return res;
+}
+async function go(fn) {
+  busy = true; refresh();
+  try { await fn(); } catch (e) { print('Error: ' + e.message); }
+  busy = false; refresh();
+}
+
+// ---- downloads ----
+// In the claude.ai artifact viewer files leave through its "downloads"
+// capability, which accepts .html/.txt/.zip and a few others but not .tar.gz.
+const viewer = window.claude && typeof window.claude.use === 'function' ? window.claude.use('downloads') : null;
+
+let offered = null;
+async function save(name, data) {
+  name = name.split('/').pop();
+  let blob = data instanceof Blob ? data : new Blob([data]);
+  if (viewer && await viewer && !/\.(html?|txt|json|md|csv|svg|zip)$/i.test(name)) {
+    blob = zip([{ path: name, data: new Uint8Array(await blob.arrayBuffer()), mtime: Date.now() }]);
+    name += '.zip';
+  }
+  offered = { name, blob };
+  $('download').textContent = 'Download ' + name;
+  $('download').hidden = false;
+}
+$('download').onclick = async () => {
+  if (!offered) return;
+  const { name, blob } = offered;
+  const dl = viewer && await viewer;
+  if (dl) {
+    try { await dl.save({ filename: name, data: blob }); }
+    catch (e) { if (e.code !== 'declined') print('Could not save ' + name + ': ' + (e.message || e.code)); }
+    return;
+  }
+  const a = document.createElement('a');
+  // A generic type keeps browsers from offering to open the file with a handler.
+  a.href = URL.createObjectURL(new Blob([blob], { type: 'application/octet-stream' }));
+  a.download = name;
+  document.body.append(a); // Firefox ignores clicks on detached links
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+};
+
+async function saveArchive(base, entries) {
+  if (viewer && await viewer) return save(base + '.zip', zip(entries.filter((e) => !e.dir)));
+  const t = tar(entries);
+  if (typeof CompressionStream === 'function') {
+    const gz = await new Response(t.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+    return save(base + '.tar.gz', gz);
+  }
+  return save(base + '.tar', t);
+}
+
+// ustar writer; names longer than 100 bytes use a GNU long-name record.
+function tar(entries) {
+  const enc = new TextEncoder();
+  const parts = [];
+  const oct = (n, len) => n.toString(8).padStart(len - 1, '0') + '\0';
+  const header = (nameBytes, size, mtime, type, mode) => {
+    const h = new Uint8Array(512);
+    const put = (s, off) => h.set(typeof s === 'string' ? enc.encode(s) : s, off);
+    put(nameBytes.subarray(0, 100), 0);
+    put(oct(mode, 8), 100); put(oct(0, 8), 108); put(oct(0, 8), 116);
+    put(oct(size, 12), 124); put(oct(Math.floor(mtime / 1000), 12), 136);
+    put('        ', 148); put(type, 156); put('ustar\0' + '00', 257);
+    let sum = 0; for (const b of h) sum += b;
+    put(oct(sum, 7) + ' ', 148);
+    return h;
+  };
+  const pad = (n) => new Uint8Array((512 - (n % 512)) % 512);
+  for (const e of entries) {
+    const name = enc.encode(e.path);
+    if (name.length > 100) {
+      parts.push(header(enc.encode('././@LongLink'), name.length + 1, 0, 'L', 0o644), name, new Uint8Array(1), pad(name.length + 1));
+    }
+    const size = e.dir ? 0 : e.data.length;
+    parts.push(header(name, size, e.mtime || Date.now(), e.dir ? '5' : '0', e.dir ? 0o755 : 0o644));
+    if (!e.dir) parts.push(e.data, pad(size));
+  }
+  parts.push(new Uint8Array(1024));
+  return new Blob(parts, { type: 'application/x-tar' });
+}
+
+// Stored (uncompressed) zip, used only inside the artifact viewer.
+function zip(entries) {
+  const enc = new TextEncoder(), parts = [], dir = [];
+  const crcTable = Array.from({ length: 256 }, (_, n) => { for (let k = 0; k < 8; k++) n = n & 1 ? 0xedb88320 ^ (n >>> 1) : n >>> 1; return n >>> 0; });
+  const crc32 = (d) => { let c = ~0; for (const b of d) c = crcTable[(c ^ b) & 255] ^ (c >>> 8); return ~c >>> 0; };
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.path), crc = crc32(e.data), n = e.data.length;
+    const rec = (sig, extra) => {
+      const v = new DataView(new ArrayBuffer(extra ? 46 : 30));
+      v.setUint32(0, sig, true); let o = 4;
+      if (extra) { v.setUint16(o, 20, true); o += 2; }
+      v.setUint16(o, 20, true); v.setUint16(o + 2, 0x800, true);
+      v.setUint32(o + 10, crc, true); v.setUint32(o + 14, n, true); v.setUint32(o + 18, n, true);
+      v.setUint16(o + 22, name.length, true);
+      if (extra) v.setUint32(42, offset, true);
+      return v.buffer;
+    };
+    parts.push(rec(0x04034b50, false), name, e.data);
+    dir.push(rec(0x02014b50, true), name);
+    offset += 30 + name.length + n;
+  }
+  const size = dir.reduce((s, p) => s + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
+  end.setUint32(12, size, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...dir, end.buffer], { type: 'application/zip' });
+}
+</script>
+</body>
+</html>
