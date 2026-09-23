@@ -14,7 +14,7 @@ python3 -m http.server
 ```
 
 Open <http://localhost:8000> and choose a TiddlyWiki file. Set any options, then click
-**Run ginsu.rb**. When the run finishes, click **Download** in the Output section to save.
+**Run ginsu.rb**. When the run finishes, click **Download** in the Output section to save as zip archive.
 
 ## Files
 
